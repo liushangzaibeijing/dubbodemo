@@ -1,6 +1,7 @@
 package com.xiu.dubbo.service.impl;
 
 import com.xiu.dubbo.service.DemoService;
+import com.xiu.dubbo.service.UserService;
 import org.springframework.stereotype.Service;
 
 /**
@@ -9,11 +10,12 @@ import org.springframework.stereotype.Service;
  * @Author xieqx
  * @Date 2021/4/25 15:35
  **/
-@Service("demoService")
+@Service("userService")
 @com.alibaba.dubbo.config.annotation.Service()
-public class DemoServiceImpl implements DemoService {
+public class UserServiceImpl implements UserService {
+
     @Override
-    public String queryDemoInfo() {
-        return "hello dubbo";
+    public String queryUserInfo() {
+        return "hello user";
     }
 }

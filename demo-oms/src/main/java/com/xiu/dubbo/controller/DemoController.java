@@ -19,7 +19,7 @@ import javax.annotation.Resource;
 @RequestMapping("/demo")
 public class DemoController {
 
-    @Reference
+    @Reference(url = "dubbo;//xxxxxx.xx:22200")
     private DemoService demoService;
 
     @RequestMapping(value = "queryDemo", method = RequestMethod.POST)
