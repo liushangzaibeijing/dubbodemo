@@ -13,6 +13,7 @@ import org.springframework.stereotype.Service;
 @Service("userService")
 @com.alibaba.dubbo.config.annotation.Service()
 public class UserServiceImpl implements UserService {
+    public String name;
 
     @Override
     public String queryUserInfo() {

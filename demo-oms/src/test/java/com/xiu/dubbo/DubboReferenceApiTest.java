@@ -3,19 +3,32 @@ package com.xiu.dubbo;
 import com.alibaba.dubbo.common.Constants;
 import com.alibaba.dubbo.common.URL;
 import com.alibaba.dubbo.common.Version;
+import com.alibaba.dubbo.common.bytecode.ClassGenerator;
+import com.alibaba.dubbo.common.bytecode.NoSuchMethodException;
+import com.alibaba.dubbo.common.bytecode.NoSuchPropertyException;
 import com.alibaba.dubbo.common.bytecode.Wrapper;
-import com.alibaba.dubbo.common.utils.ConfigUtils;
-import com.alibaba.dubbo.common.utils.NetUtils;
-import com.alibaba.dubbo.common.utils.StringUtils;
+import com.alibaba.dubbo.common.extension.ExtensionLoader;
+import com.alibaba.dubbo.common.utils.*;
 import com.alibaba.dubbo.config.*;
+import com.alibaba.dubbo.config.invoker.DelegateProviderMetaDataInvoker;
 import com.alibaba.dubbo.config.model.ApplicationModel;
 import com.alibaba.dubbo.config.model.ConsumerModel;
+import com.alibaba.dubbo.remoting.RemotingException;
+import com.alibaba.dubbo.remoting.Transporter;
+import com.alibaba.dubbo.remoting.exchange.ExchangeServer;
+import com.alibaba.dubbo.remoting.exchange.Exchangers;
+import com.alibaba.dubbo.rpc.Exporter;
 import com.alibaba.dubbo.rpc.Invoker;
+import com.alibaba.dubbo.rpc.RpcException;
 import com.alibaba.dubbo.rpc.StaticContext;
 import com.alibaba.dubbo.rpc.cluster.directory.StaticDirectory;
 import com.alibaba.dubbo.rpc.cluster.support.AvailableCluster;
 import com.alibaba.dubbo.rpc.cluster.support.ClusterUtils;
+import com.alibaba.dubbo.rpc.protocol.dubbo.DubboCodec;
+import com.alibaba.dubbo.rpc.protocol.dubbo.DubboExporter;
 import com.alibaba.dubbo.rpc.protocol.injvm.InjvmProtocol;
+import com.alibaba.dubbo.rpc.proxy.AbstractProxyInvoker;
+import com.alibaba.dubbo.rpc.proxy.javassist.JavassistProxyFactory;
 import com.alibaba.dubbo.rpc.service.GenericService;
 import com.alibaba.dubbo.rpc.support.ProtocolUtils;
 import com.xiu.dubbo.service.UserService;
@@ -25,7 +38,13 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.lang.ref.Reference;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Matcher;
 
 import static com.alibaba.dubbo.common.utils.NetUtils.isInvalidLocalHost;
 
@@ -36,20 +55,7 @@ import static com.alibaba.dubbo.common.utils.NetUtils.isInvalidLocalHost;
  * @Date 2021/5/21 9:17
  **/
 public class DubboReferenceApiTest {
-
-
-
-    @Test
-    public void testAsync(){
-        Properties properties = System.getProperties();
-        Set<Object> objects = properties.keySet();
-
-        for(Object key:objects){
-            Object value = properties.get(key);
-            System.out.println("key: "+key+", value: "+value);
-        }
-    }
-
+    private static AtomicLong WRAPPER_CLASS_COUNTER = new AtomicLong(0);
     /**
      * dubbo 服务消费者api形式进行服务消费
      */
@@ -87,95 +93,34 @@ public class DubboReferenceApiTest {
         //调用对象方法
         String info = userService.queryUserInfo();
         System.out.println(info);
+//        JavassistProxyFactory
     }
 
 
-    private T createProxy(Map<String, String> map) {
-        //判断是不是dubbo的本地调用
-        URL tmpUrl = new URL("temp", "localhost", 0, map);
-        final boolean isJvmRefer;
-        if (isInjvm() == null) {
-            if (url != null && url.length() > 0) { // if a url is specified, don't do local reference
-                isJvmRefer = false;
-            } else if (InjvmProtocol.getInjvmProtocol().isInjvmRefer(tmpUrl)) {
-                // by default, reference local service if there is
-                isJvmRefer = true;
-            } else {
-                isJvmRefer = false;
-            }
-        } else {
-            isJvmRefer = isInjvm().booleanValue();
+  //对于单个注册中心则直接调用protocol.refer()获取远程调用对象Invoker
+  if (urls.size() == 1) {
+    invoker = refprotocol.refer(interfaceClass, urls.get(0));
+  } else {
+    List<Invoker<?>> invokers = new ArrayList<Invoker<?>>();
+    URL registryURL = null;
+    //对于多注册中心则多次调用protocol.refer()获取远程调用对象Invoker
+    for (URL url : urls) {
+        invokers.add(refprotocol.refer(interfaceClass, url));
+        //此处对于多注册中心 则获取最新的注册中心url 从该注册中心上获取对应的服务信息
+        if (Constants.REGISTRY_PROTOCOL.equals(url.getProtocol())) {
+            registryURL = url; // use last registry url
         }
-        //如果是本地调用获取本地调用的invoker
-        if (isJvmRefer) {
-            URL url = new URL(Constants.LOCAL_PROTOCOL, NetUtils.LOCALHOST, 0, interfaceClass.getName()).addParameters(map);
-            invoker = refprotocol.refer(interfaceClass, url);
-            if (logger.isInfoEnabled()) {
-                logger.info("Using injvm service " + interfaceClass.getName());
-            }
-        } else {
-            //判断是不是点对点
-            if (url != null && url.length() > 0) { // user specified URL, could be peer-to-peer address, or register center's address.
-                String[] us = Constants.SEMICOLON_SPLIT_PATTERN.split(url);
-                if (us != null && us.length > 0) {
-                    for (String u : us) {
-                        URL url = URL.valueOf(u);
-                        if (url.getPath() == null || url.getPath().length() == 0) {
-                            url = url.setPath(interfaceName);
-                        }
-                        if (Constants.REGISTRY_PROTOCOL.equals(url.getProtocol())) {
-                            urls.add(url.addParameterAndEncoded(Constants.REFER_KEY, StringUtils.toQueryString(map)));
-                        } else {
-                            urls.add(ClusterUtils.mergeUrl(url, map));
-                        }
-                    }
-                }
-            } else {
-                //走注册中心
-                //获取多个注册中心以及注册中心对应的监控中心 遍历将注册中心和监控中心添加到Dubbo URL 集合中 后面创建Invoker对象用
-                //获取多个注册中心
-                List<URL> us = loadRegistries(false);
-                if (us != null && !us.isEmpty()) {
-                    for (URL u : us) {
-                        //获取注册中心对应的监控中心
-                        URL monitorUrl = loadMonitor(u);
-                        if (monitorUrl != null) {
-                            map.put(Constants.MONITOR_KEY, URL.encode(monitorUrl.toFullString()));
-                        }
-                        //添加到DubboURL集合中 该Dubbo URL 是注册中心转换的url
-                        urls.add(u.addParameterAndEncoded(Constants.REFER_KEY, StringUtils.toQueryString(map)));
-                    }
-                }
-                if (urls == null || urls.isEmpty()) {
-                    throw new IllegalStateException("No such any registry to reference " + interfaceName + " on the consumer " + NetUtils.getLocalHost() + " use dubbo version " + Version.getVersion() + ", please config <dubbo:registry address=\"...\" /> to your spring config.");
-                }
-            }
-            //注册中心单个则使用该注册中心创建对应的Invoker
-            if (urls.size() == 1) {
-                invoker = refprotocol.refer(interfaceClass, urls.get(0));
-            } else {
-                //多个注册中心遍历处理 每一个注册中心创建一个Invoker添加到invokers集合中
-                //最终选则最新的注册地址
-                List<Invoker<?>> invokers = new ArrayList<Invoker<?>>();
-                URL registryURL = null;
-                for (URL url : urls) {
-                    invokers.add(refprotocol.refer(interfaceClass, url));
-                    if (Constants.REGISTRY_PROTOCOL.equals(url.getProtocol())) {
-                        registryURL = url; // use last registry url
-                    }
-                }
-                if (registryURL != null) { // registry url is available
-                    // use AvailableCluster only when register's cluster is available
-                    URL u = registryURL.addParameter(Constants.CLUSTER_KEY, AvailableCluster.NAME);
-                    invoker = cluster.join(new StaticDirectory(u, invokers));
-                } else { // not a registry url
-                    invoker = cluster.join(new StaticDirectory(invokers));
-                }
-            }
-        }
-       //省略日志打印
-        //使用ProxyFacrory创建dubbo服务对应的代理对象
-        return (T) proxyFactory.getProxy(invoker);
     }
+    //
+    if (registryURL != null) {
+        //从注册中心中获取多
+        URL u = registryURL.addParameter(Constants.CLUSTER_KEY, AvailableCluster.NAME);
+        invoker = cluster.join(new StaticDirectory(u, invokers));
+    } else { // not a registry url
+        invoker = cluster.join(new StaticDirectory(invokers));
+    }
+}
+
+
 
 }
